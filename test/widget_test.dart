@@ -12,11 +12,11 @@ void main() {
     await PrefsUtil().setIsFirstOpen(false);
   });
 
-  testWidgets('显示压缩入口标签', (tester) async {
+  testWidgets('显示压缩界面', (tester) async {
     await tester.pumpWidget(const MyApp());
     await tester.pumpAndSettle();
 
-    expect(find.text('单文件压缩'), findsOneWidget);
-    expect(find.text('批量压缩'), findsOneWidget);
+    expect(find.text('压缩参数设置:'), findsOneWidget);
+    expect(find.text('全局进度'), findsOneWidget);
   });
 }

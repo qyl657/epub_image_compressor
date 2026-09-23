@@ -25,6 +25,8 @@ class CompressLogic extends GetxController {
   final RxBool skipSmall = true.obs;
   final RxInt minKb = 12.obs;
   final RxInt pngLevel = 6.obs;
+  final RxBool convertPngToJpg = true.obs;
+  final RxBool convertTransparentPng = false.obs;
 
   final EpubCompressor _compressor = EpubCompressor();
   CancellationToken? _token;
@@ -35,6 +37,8 @@ class CompressLogic extends GetxController {
         skipSmallImages: skipSmall.value,
         minImageBytes: minKb.value * 1024,
         pngLevel: pngLevel.value,
+        convertPngToJpg: convertPngToJpg.value,
+        convertTransparentPng: convertTransparentPng.value,
       );
 
   Future<void> pickBatchFiles() async {

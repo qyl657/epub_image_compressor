@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
@@ -6,9 +7,58 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:archive/archive_io.dart';
+import 'package:epub_image_compressor/service/epub_reference_rewriter.dart';
 import 'package:epub_image_compressor/utils/app_util.dart';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
+
+String _zipExt(String path) {
+  final dot = path.lastIndexOf('.');
+  final slash = path.lastIndexOf('/');
+  return (dot >= 0 && dot > slash) ? path.substring(dot).toLowerCase() : '';
+}
+
+String _zipBasename(String path) => path.substring(path.lastIndexOf('/') + 1);
+
+String _toJpgPath(String path) {
+  final dot = path.lastIndexOf('.');
+  final slash = path.lastIndexOf('/');
+  return (dot >= 0 && dot > slash)
+      ? '${path.substring(0, dot)}.jpg'
+      : '$path.jpg';
+}
+
+/// True when the PNG actually carries transparency (an alpha channel with at
+/// least one pixel that is not fully opaque). Fully-opaque PNGs that merely
+/// have an alpha channel return false and are safe to convert to JPEG.
+bool _hasTransparency(img.Image image) {
+  if (!image.hasAlpha) return false;
+  final maxAlpha = image.maxChannelValue;
+  return image.any((px) => px.a < maxAlpha);
+}
+
+/// Composite [image] onto a white background and return an RGB (no alpha)
+/// image, so it can be encoded as JPEG without turning transparent areas black.
+img.Image _flattenToWhite(img.Image image) {
+  final maxChannel = image.maxChannelValue.toDouble();
+  final out = img.Image(
+    width: image.width,
+    height: image.height,
+    numChannels: 3,
+  );
+  for (var y = 0; y < image.height; y++) {
+    for (var x = 0; x < image.width; x++) {
+      final px = image.getPixel(x, y);
+      final a = (px.a / maxChannel).clamp(0.0, 1.0);
+      final inv = 1.0 - a;
+      final r = (((px.r / maxChannel) * a + inv) * 255).round().clamp(0, 255);
+      final g = (((px.g / maxChannel) * a + inv) * 255).round().clamp(0, 255);
+      final b = (((px.b / maxChannel) * a + inv) * 255).round().clamp(0, 255);
+      out.setPixelRgb(x, y, r, g, b);
+    }
+  }
+  return out;
+}
 
 class CompressionOptions {
   const CompressionOptions({
@@ -16,6 +66,8 @@ class CompressionOptions {
     this.skipSmallImages = true,
     this.minImageBytes = 10 * 1024,
     this.pngLevel = 6,
+    this.convertPngToJpg = true,
+    this.convertTransparentPng = false,
   });
 
   final int quality;
@@ -23,12 +75,23 @@ class CompressionOptions {
   final int minImageBytes;
   final int pngLevel;
 
+  /// When true, opaque PNG images are re-encoded as JPEG (and the file is
+  /// renamed .png -> .jpg with all EPUB references updated) to save space.
+  final bool convertPngToJpg;
+
+  /// When [convertPngToJpg] is true, also convert PNGs that carry real
+  /// transparency by flattening them onto a white background first. Off by
+  /// default because JPEG has no alpha and this is a lossy visual change.
+  final bool convertTransparentPng;
+
   Map<String, dynamic> toMap() {
     return {
       'quality': quality,
       'skipSmallImages': skipSmallImages,
       'minImageBytes': minImageBytes,
       'pngLevel': pngLevel,
+      'convertPngToJpg': convertPngToJpg,
+      'convertTransparentPng': convertTransparentPng,
     };
   }
 
@@ -38,6 +101,8 @@ class CompressionOptions {
       skipSmallImages: map['skipSmallImages'] as bool? ?? true,
       minImageBytes: map['minImageBytes'] as int? ?? 10 * 1024,
       pngLevel: map['pngLevel'] as int? ?? 6,
+      convertPngToJpg: map['convertPngToJpg'] as bool? ?? true,
+      convertTransparentPng: map['convertTransparentPng'] as bool? ?? false,
     );
   }
 
@@ -46,12 +111,17 @@ class CompressionOptions {
     bool? skipSmallImages,
     int? minImageBytes,
     int? pngLevel,
+    bool? convertPngToJpg,
+    bool? convertTransparentPng,
   }) {
     return CompressionOptions(
       quality: quality ?? this.quality,
       skipSmallImages: skipSmallImages ?? this.skipSmallImages,
       minImageBytes: minImageBytes ?? this.minImageBytes,
       pngLevel: pngLevel ?? this.pngLevel,
+      convertPngToJpg: convertPngToJpg ?? this.convertPngToJpg,
+      convertTransparentPng:
+          convertTransparentPng ?? this.convertTransparentPng,
     );
   }
 }
@@ -256,27 +326,42 @@ class EpubCompressor {
         .length;
   }
 
-  Future<List<int>?> _compressBytes(
+  /// Decode, then re-encode [bytes] according to [options].
+  ///
+  /// Returns `(encodedBytes, convertedToJpg)`. A null first element means the
+  /// bytes could not be decoded and the original should be kept. The second
+  /// element is true only when a `.png` was actually re-encoded as JPEG (which
+  /// the caller turns into a file rename plus reference update).
+  Future<(List<int>?, bool)> _compressBytes(
     List<int> bytes,
     String ext,
     CompressionOptions options,
   ) async {
     // Run the CPU-heavy decode/encode work on a helper isolate
     // so the UI isolate stays responsive while compressing many images.
-    return Isolate.run(() {
+    return Isolate.run<(List<int>?, bool)>(() {
       final image = img.decodeImage(Uint8List.fromList(bytes));
-      if (image == null) return null;
+      if (image == null) return (null, false);
 
       if (ext == '.png') {
-        return img.encodePng(
-          image,
-          level: options.pngLevel.clamp(0, 9),
+        final transparent = _hasTransparency(image);
+        if (options.convertPngToJpg &&
+            (!transparent || options.convertTransparentPng)) {
+          final source = transparent ? _flattenToWhite(image) : image;
+          return (
+            img.encodeJpg(source, quality: options.quality.clamp(1, 100)),
+            true,
+          );
+        }
+        return (
+          img.encodePng(image, level: options.pngLevel.clamp(0, 9)),
+          false,
         );
       }
 
-      return img.encodeJpg(
-        image,
-        quality: options.quality.clamp(1, 100),
+      return (
+        img.encodeJpg(image, quality: options.quality.clamp(1, 100)),
+        false,
       );
     });
   }
@@ -287,6 +372,15 @@ class EpubCompressor {
   }) {
     final fileName = p.basename(inputPath);
     return p.join(outputDir, fileName);
+  }
+
+  ArchiveFile _rebuild(ArchiveFile src, String name, List<int> bytes) {
+    return ArchiveFile(name, bytes.length, bytes)
+      ..mode = src.mode
+      ..lastModTime = src.lastModTime
+      ..isFile = src.isFile
+      ..isSymbolicLink = src.isSymbolicLink
+      ..nameOfLinkedFile = src.nameOfLinkedFile;
   }
 
   Future<CompressionSummary> _compressEpubInternal({
@@ -328,6 +422,111 @@ class EpubCompressor {
       await Future<void>.delayed(Duration.zero);
     }
 
+    // ---- Pass 1: plan. Decode + re-encode every image up front. ----
+    // A PNG renamed to JPG must be done consistently everywhere, so the full
+    // set of renames has to be known before any reference is rewritten in
+    // pass 2. A rename is only planned when it is unambiguous: the source
+    // basename is unique in the container and the destination name is free.
+    final allPaths = <String>{};
+    final imageBasenameCount = <String, int>{};
+    for (final f in archive) {
+      if (!f.isFile) continue;
+      allPaths.add(f.name);
+      if (_isImage(_zipExt(f.name))) {
+        final base = _zipBasename(f.name);
+        imageBasenameCount[base] = (imageBasenameCount[base] ?? 0) + 1;
+      }
+    }
+
+    final convertedBytes = <String, List<int>>{}; // png path -> JPEG bytes
+    final sameNameBytes = <String, List<int>>{}; // path -> recompressed bytes
+    final renameByBasename = <String, String>{}; // 'cover.png' -> 'cover.jpg'
+    final convertedNewBasenames = <String>{}; // 'cover.jpg'
+
+    for (final f in archive) {
+      if (isCancelled()) {
+        throw CompressionCancelled();
+      }
+      if (!f.isFile) continue;
+
+      final ext = _zipExt(f.name);
+      if (!_isImage(ext)) continue;
+
+      final originalBytes = f.content as List<int>;
+      final originalSize = originalBytes.length;
+
+      if (options.skipSmallImages && originalSize < options.minImageBytes) {
+        processedImages++;
+        await updateProgress(f.name);
+        onLog?.call('Skip small image: ${f.name}');
+        continue;
+      }
+
+      if (ext == '.webp') {
+        processedImages++;
+        await updateProgress(f.name);
+        onLog?.call('Keep WebP: ${f.name}');
+        continue;
+      }
+
+      var replaced = false;
+      try {
+        final (bytes, convertedToJpg) =
+            await _compressBytes(originalBytes, ext, options);
+
+        if (bytes == null) {
+          onLog?.call('Keep original (undecodable): ${f.name}');
+        } else if (bytes.length >= originalSize) {
+          onLog?.call('Keep original: ${f.name}');
+        } else if (convertedToJpg) {
+          final newName = _toJpgPath(f.name);
+          final oldBase = _zipBasename(f.name);
+          final newBase = _zipBasename(newName);
+          // Renaming relies on literal basename substitution in pass 2. A
+          // name containing a space or % # ? is frequently percent-encoded
+          // inside href/src, which substitution cannot match, so such files
+          // are left untouched to avoid breaking the reference.
+          final unsafeName = RegExp(r'''[% #?]''').hasMatch(oldBase);
+          final ambiguous = unsafeName ||
+              (imageBasenameCount[oldBase] ?? 0) > 1 ||
+              (imageBasenameCount[newBase] ?? 0) > 0 ||
+              allPaths.contains(newName);
+          if (ambiguous) {
+            // Cannot rewrite references safely; keep the original PNG.
+            onLog?.call('Keep PNG (not safely renameable): ${f.name}');
+          } else {
+            convertedBytes[f.name] = bytes;
+            renameByBasename[oldBase] = newBase;
+            convertedNewBasenames.add(newBase);
+            savedBytes += originalSize - bytes.length;
+            onLog?.call(
+              'Convert PNG->JPG: ${f.name} '
+              '(${AppUtil.formatSize(originalSize)} -> ${AppUtil.formatSize(bytes.length)})',
+            );
+            replaced = true;
+          }
+        } else {
+          sameNameBytes[f.name] = bytes;
+          savedBytes += originalSize - bytes.length;
+          onLog?.call(
+            'Compressed: ${f.name} '
+            '(${AppUtil.formatSize(originalSize)} -> ${AppUtil.formatSize(bytes.length)})',
+          );
+          replaced = true;
+        }
+      } catch (e) {
+        onLog?.call('Compress failed, keep original: ${f.name}: $e');
+      } finally {
+        processedImages++;
+        await updateProgress(f.name);
+        // Free the decoded original once its replacement bytes are cached;
+        // entries still needing their original are cleared after pass 2.
+        if (replaced) {
+          f.clear();
+        }
+      }
+    }
+
     final outputPath = _buildOutputPath(
       inputPath: inputPath,
       outputDir: outputDir,
@@ -335,86 +534,76 @@ class EpubCompressor {
     final outputFile = File(outputPath);
     await outputFile.parent.create(recursive: true);
 
+    // ---- Pass 2: serialize. Write images (renaming where planned) and,
+    // for text documents, rewrite every reference to a renamed image. ----
     final outputStream = OutputFileStream(outputPath);
     final encoder = ZipEncoder();
 
     try {
       encoder.startEncode(outputStream, level: Deflate.BEST_SPEED);
 
-      for (final file in archive) {
+      for (final f in archive) {
         if (isCancelled()) {
           throw CompressionCancelled();
         }
 
-        if (!file.isFile) {
-          encoder.addFile(file, autoClose: false);
+        if (!f.isFile) {
+          encoder.addFile(f, autoClose: false);
           continue;
         }
 
-        final ext = p.extension(file.name).toLowerCase();
-        if (!_isImage(ext)) {
-          encoder.addFile(file, autoClose: false);
-          continue;
-        }
+        final ext = _zipExt(f.name);
 
-        final originalSize = file.size;
-        if (options.skipSmallImages && originalSize < options.minImageBytes) {
-          processedImages++;
-          await updateProgress(file.name);
-          onLog?.call('Skip small image: ${file.name}');
-          encoder.addFile(file, autoClose: false);
-          continue;
-        }
-
-        if (ext == '.webp') {
-          processedImages++;
-          await updateProgress(file.name);
-          onLog?.call('Keep WebP: ${file.name}');
-          encoder.addFile(file, autoClose: false);
-          continue;
-        }
-
-        try {
-          final originalBytes = file.content as List<int>;
-          final compressedBytes = await _compressBytes(
-            originalBytes,
-            ext,
-            options,
-          );
-
-          List<int> bytesToStore = originalBytes;
-          if (compressedBytes != null &&
-              compressedBytes.length < originalBytes.length) {
-            savedBytes += originalBytes.length - compressedBytes.length;
-            bytesToStore = compressedBytes;
-            onLog?.call(
-              'Compressed: ${file.name} '
-              '(${AppUtil.formatSize(originalBytes.length)} -> ${AppUtil.formatSize(compressedBytes.length)})',
+        if (_isImage(ext)) {
+          if (convertedBytes.containsKey(f.name)) {
+            encoder.addFile(
+              _rebuild(f, _toJpgPath(f.name), convertedBytes[f.name]!),
+              autoClose: true,
+            );
+          } else if (sameNameBytes.containsKey(f.name)) {
+            encoder.addFile(
+              _rebuild(f, f.name, sameNameBytes[f.name]!),
+              autoClose: true,
             );
           } else {
-            onLog?.call('Keep original: ${file.name}');
+            encoder.addFile(f, autoClose: false);
           }
-
-          final optimizedFile = ArchiveFile(
-            file.name,
-            bytesToStore.length,
-            bytesToStore,
-          )
-            ..mode = file.mode
-            ..lastModTime = file.lastModTime
-            ..isFile = file.isFile
-            ..isSymbolicLink = file.isSymbolicLink
-            ..nameOfLinkedFile = file.nameOfLinkedFile;
-
-          encoder.addFile(optimizedFile, autoClose: true);
-        } catch (e) {
-          onLog?.call('Compress failed, keep original: ${file.name}: $e');
-          encoder.addFile(file, autoClose: false);
-        } finally {
-          processedImages++;
-          await updateProgress(file.name);
-          file.clear();
+          continue;
         }
+
+        if (renameByBasename.isNotEmpty &&
+            EpubReferenceRewriter.isTextRefFile(ext)) {
+          try {
+            final original = f.content as List<int>;
+            final text = utf8.decode(original, allowMalformed: true);
+            var rewritten = EpubReferenceRewriter.rewriteReferences(
+              text,
+              renameByBasename,
+            );
+            if (ext == '.opf') {
+              rewritten = EpubReferenceRewriter.fixOpfMediaTypes(
+                rewritten,
+                convertedNewBasenames,
+              );
+            }
+            if (rewritten != text) {
+              encoder.addFile(
+                _rebuild(f, f.name, utf8.encode(rewritten)),
+                autoClose: true,
+              );
+              onLog?.call('Rewrote references: ${f.name}');
+            } else {
+              encoder.addFile(f, autoClose: false);
+            }
+          } catch (e) {
+            onLog?.call('Reference rewrite failed, keep original: '
+                '${f.name}: $e');
+            encoder.addFile(f, autoClose: false);
+          }
+          continue;
+        }
+
+        encoder.addFile(f, autoClose: false);
       }
 
       if (isCancelled()) {
