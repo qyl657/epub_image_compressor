@@ -1,6 +1,6 @@
 class AppStrings {
   static const String appName = 'epub文件图片资源压缩工具';
-  static const String appVersion = 'v1.0.1';
+  static const String appVersion = 'v1.0.2';
   static const String appAuthor = 'XinJianteng';
   static const String github = 'https://github.com/xinjianteng/epub_image_compressor';
   static const String appNewVersion = 'https://github.com/xinjianteng/epub_image_compressor/releases';
