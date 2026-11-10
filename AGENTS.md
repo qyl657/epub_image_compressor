@@ -5,6 +5,7 @@
 - Feature code is split by concern: `lib/pages/` (screens), `lib/routers/` (routes and navigation observers), `lib/service/` (auth/token lifecycle), `lib/api/` (GetConnect client and config), `lib/models/` (DTOs), `lib/utils/` (logger, prefs, crypto, misc helpers), and `lib/values/` (colors, strings, dimens).
 - Shared assets sit under `assets/images/`; keep new assets referenced in `pubspec.yaml`.
 - Platform shells are in `android/`, `ios/`, `linux/`, `macos/`, `web/`, `windows/`, and `ohos/`; widget tests live in `test/`.
+- Build/pack tooling lives in `scripts/`; publishable artifacts go to `dist/` and are never committed.
 
 ## Build, Test, and Development Commands
 - Install deps: `flutter pub get`.
@@ -13,6 +14,7 @@
 - Tests: `flutter test` (runs widget and unit suites in `test/`).
 - Run locally: `flutter run -d windows` (desktop) or `flutter run -d chrome` for web; swap `-d` for your target device.
 - Release builds: `flutter build apk --release` (Android) or `flutter build windows` / `flutter build macos` as needed.
+- Windows 发布包统一走 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack_windows.ps1`（加 `-Build` 先重新构建）。产物写到 `dist/epub_image_compressor_v<version>_win64.zip`（`dist/` 已 gitignore）。不要手工挑文件压缩：`build/windows/x64/runner/Release/data/` 缺失会让应用在别人机器上直接闪退，VC++ 运行时缺失会报丢失 MSVCP140.dll，这两件事脚本都会自动补上并校验。
 
 ## Coding Style & Naming Conventions
 - Follow Dart style and `flutter_lints`; prefer 2-space indentation, single quotes, trailing commas in widget trees, and explicit types for public APIs.

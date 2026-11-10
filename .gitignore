@@ -31,6 +31,9 @@ migrate_working_dir/
 .pub/
 /build/
 
+# Release artifacts (see scripts/pack_windows.ps1)
+/dist/
+
 # Symbolication related
 app.*.symbols
 
