@@ -29,8 +29,3 @@
 - `assets/images/`：启动页/占位图资源目录（可自行替换）。
 
 更多需求细节可见 `records/demand.md`。*** End Patch
-
-
-支持作者：
-
-- ![项目logo](assets/images/wechat_pay.jpg)
