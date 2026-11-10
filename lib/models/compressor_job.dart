@@ -1,3 +1,4 @@
+import 'package:epub_image_compressor/service/epub_image_probe.dart';
 import 'package:epub_image_compressor/utils/app_util.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as p;
@@ -55,6 +56,12 @@ class CompressorJob {
 
   /// 处理耗时
   final Rxn<Duration> elapsed = Rxn<Duration>();
+
+  /// 源图粗扫结果，未扫描时为 null
+  final Rxn<SourceReport> probe = Rxn<SourceReport>();
+
+  /// 粗扫进行中
+  final RxBool probing = false.obs;
 
   /// 开始时间
   DateTime? startTime;

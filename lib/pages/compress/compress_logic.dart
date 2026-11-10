@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 
 import '../../models/models.dart';
 import '../../service/epub_compressor.dart';
+import '../../service/epub_image_probe.dart';
 import 'compress_state.dart';
 
 class CompressLogic extends GetxController {
@@ -27,6 +28,10 @@ class CompressLogic extends GetxController {
   final RxInt pngLevel = 6.obs;
   final RxBool convertPngToJpg = true.obs;
   final RxBool convertTransparentPng = false.obs;
+  final RxBool fullChroma = false.obs;
+
+  /// 粗扫采样张数
+  final RxInt probeSamples = 8.obs;
 
   final EpubCompressor _compressor = EpubCompressor();
   CancellationToken? _token;
@@ -39,6 +44,7 @@ class CompressLogic extends GetxController {
         pngLevel: pngLevel.value,
         convertPngToJpg: convertPngToJpg.value,
         convertTransparentPng: convertTransparentPng.value,
+        fullChroma: fullChroma.value,
       );
 
   Future<void> pickBatchFiles() async {
@@ -70,6 +76,25 @@ class CompressLogic extends GetxController {
     update();
   }
 
+  /// 粗扫该任务的源图，只报告、不改动任何压缩参数。
+  Future<void> probeJob(CompressorJob job) async {
+    if (job.probing.value) return;
+    job.probing.value = true;
+    try {
+      final report = await EpubImageProbe.probe(
+        job.inputPath,
+        samples: probeSamples.value,
+      );
+      job.probe.value = report;
+      _log(job, '源图粗扫：${report.describe()}');
+    } catch (e) {
+      job.probe.value = SourceReport(error: '$e');
+      _log(job, '源图粗扫失败：$e');
+    } finally {
+      job.probing.value = false;
+    }
+  }
+
   void clearBatch() {
     if (isRunning.value) return;
     state.newJobs.clear();
@@ -82,11 +107,14 @@ class CompressLogic extends GetxController {
     if (dir == null) return;
     outputDir.value = dir;
     for (var i = 0; i < state.newJobs.length; i++) {
-      state.newJobs[i] = CompressorJob(
-        inputPath: state.newJobs[i].inputPath,
+      final old = state.newJobs[i];
+      final next = CompressorJob(
+        inputPath: old.inputPath,
         outputDir: dir,
-        suggestedOutputDir: state.newJobs[i].suggestedOutputDir,
+        suggestedOutputDir: old.suggestedOutputDir,
       );
+      next.probe.value = old.probe.value;
+      state.newJobs[i] = next;
     }
     state.newJobs.refresh();
     update();
@@ -95,11 +123,14 @@ class CompressLogic extends GetxController {
   void clearOutputDir() {
     outputDir.value = '';
     for (var i = 0; i < state.newJobs.length; i++) {
-      state.newJobs[i] = CompressorJob(
-        inputPath: state.newJobs[i].inputPath,
+      final old = state.newJobs[i];
+      final next = CompressorJob(
+        inputPath: old.inputPath,
         outputDir: null,
-        suggestedOutputDir: state.newJobs[i].suggestedOutputDir,
+        suggestedOutputDir: old.suggestedOutputDir,
       );
+      next.probe.value = old.probe.value;
+      state.newJobs[i] = next;
     }
     update();
   }

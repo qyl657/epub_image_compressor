@@ -245,6 +245,71 @@ class _CompressPageState extends State<CompressPage> {
               Text('透明区域会被铺成白色背景（JPEG不支持透明），可能改变显示效果，默认关闭。',
                   style: state.buildTextStyle(10, color: Colors.red)),
               state.buildHorizontalDivider(),
+              // 色度抽样：默认 4:2:0（中）；4:4:4（高）保色度但体积更大。
+              Obx(
+                () => SizedBox(
+                  height: 50,
+                  child: Row(
+                    children: [
+                      Expanded(
+                          flex: 1,
+                          child:
+                              Text('色度抽样:', style: state.buildTextStyle(12))),
+                      Expanded(
+                        flex: 3,
+                        child: FilterChip(
+                          label: Text(logic.fullChroma.value
+                              ? '高 (4:4:4)'
+                              : '中 (4:2:0)'),
+                          selectedColor: AppColors.primary,
+                          selected: logic.fullChroma.value,
+                          onSelected: (v) => logic.fullChroma.value = v,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Text(
+                  '输出 JPEG 的色度抽样。「中」=4:2:0，与绝大多数源图一致、体积更小；'
+                  '「高」=4:4:4 保留全色度，文件约大 12~18%，仅当色块文字或细彩线'
+                  '边缘出现渗色时才需要。',
+                  style: state.buildTextStyle(10, color: Colors.red)),
+              state.buildHorizontalDivider(),
+              // 源图粗扫的采样张数。
+              Obx(
+                () => SizedBox(
+                  height: 50,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Expanded(
+                        flex: 1,
+                        child: Text('粗扫采样：', style: state.buildTextStyle(12)),
+                      ),
+                      Expanded(
+                        flex: 3,
+                        child: Slider(
+                          value: logic.probeSamples.value.toDouble(),
+                          activeColor: AppColors.primary,
+                          inactiveColor: AppColors.surface,
+                          min: 2,
+                          max: 40,
+                          divisions: 19,
+                          label: '${logic.probeSamples.value} 张',
+                          onChanged: (v) =>
+                              logic.probeSamples.value = v.round(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Text(
+                  '添加文件后点任务行上的「快速扫描」，按上面的张数均匀抽取图片，'
+                  '只读文件头报告格式占比、JPEG 色度与源质量估计，不会改动任何压缩参数。',
+                  style: state.buildTextStyle(10, color: Colors.red)),
+              state.buildHorizontalDivider(),
               SizedBox(height: 5),
               Row(
                 children: [
@@ -468,6 +533,39 @@ class _CompressPageState extends State<CompressPage> {
                 ],
               ),
             ),
+            const SizedBox(height: 8),
+            // 源图粗扫：只报告，不改参数。
+            Obx(() {
+              final report = job.probe.value;
+              final probing = job.probing.value;
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      report == null ? '未扫描源图。' : report.describe(),
+                      style: state.buildTextStyle(10),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: probing ? null : () => logic.probeJob(job),
+                    icon: Icon(
+                      probing ? Icons.hourglass_empty : Icons.query_stats,
+                      size: 16,
+                    ),
+                    label: Text(
+                      probing ? '扫描中…' : '快速扫描',
+                      style: state.buildTextStyle(10),
+                    ),
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.primary,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 32),
+                    ),
+                  ),
+                ],
+              );
+            }),
           ],
         ),
       ),

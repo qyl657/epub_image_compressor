@@ -68,6 +68,7 @@ class CompressionOptions {
     this.pngLevel = 6,
     this.convertPngToJpg = true,
     this.convertTransparentPng = false,
+    this.fullChroma = false,
   });
 
   final int quality;
@@ -84,6 +85,15 @@ class CompressionOptions {
   /// default because JPEG has no alpha and this is a lossy visual change.
   final bool convertTransparentPng;
 
+  /// JPEG chroma sampling. `img.encodeJpg` defaults to 4:4:4, which costs
+  /// 12-18% more bytes than the 4:2:0 that virtually every source JPEG uses;
+  /// leaving it false also eats the whole shrink margin on already-compressed
+  /// scans and makes them fall back to "keep original".
+  final bool fullChroma;
+
+  img.JpegChroma get jpegChroma =>
+      fullChroma ? img.JpegChroma.yuv444 : img.JpegChroma.yuv420;
+
   Map<String, dynamic> toMap() {
     return {
       'quality': quality,
@@ -92,6 +102,7 @@ class CompressionOptions {
       'pngLevel': pngLevel,
       'convertPngToJpg': convertPngToJpg,
       'convertTransparentPng': convertTransparentPng,
+      'fullChroma': fullChroma,
     };
   }
 
@@ -103,6 +114,7 @@ class CompressionOptions {
       pngLevel: map['pngLevel'] as int? ?? 6,
       convertPngToJpg: map['convertPngToJpg'] as bool? ?? true,
       convertTransparentPng: map['convertTransparentPng'] as bool? ?? false,
+      fullChroma: map['fullChroma'] as bool? ?? false,
     );
   }
 
@@ -113,6 +125,7 @@ class CompressionOptions {
     int? pngLevel,
     bool? convertPngToJpg,
     bool? convertTransparentPng,
+    bool? fullChroma,
   }) {
     return CompressionOptions(
       quality: quality ?? this.quality,
@@ -122,6 +135,7 @@ class CompressionOptions {
       convertPngToJpg: convertPngToJpg ?? this.convertPngToJpg,
       convertTransparentPng:
           convertTransparentPng ?? this.convertTransparentPng,
+      fullChroma: fullChroma ?? this.fullChroma,
     );
   }
 }
@@ -349,7 +363,9 @@ class EpubCompressor {
             (!transparent || options.convertTransparentPng)) {
           final source = transparent ? _flattenToWhite(image) : image;
           return (
-            img.encodeJpg(source, quality: options.quality.clamp(1, 100)),
+            img.encodeJpg(source,
+                quality: options.quality.clamp(1, 100),
+                chroma: options.jpegChroma),
             true,
           );
         }
@@ -360,7 +376,8 @@ class EpubCompressor {
       }
 
       return (
-        img.encodeJpg(image, quality: options.quality.clamp(1, 100)),
+        img.encodeJpg(image,
+            quality: options.quality.clamp(1, 100), chroma: options.jpegChroma),
         false,
       );
     });
